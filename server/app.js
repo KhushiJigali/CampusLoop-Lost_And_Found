@@ -1,0 +1,58 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import multer from 'multer';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mongoose from 'mongoose';
+import itemRoutes from './routes/itemRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import matchRoutes from './routes/matchRoutes.js';
+import dashboardRoutes from './routes/dashboardRoutes.js';
+import searchRoutes from './routes/searchRoutes.js';
+import CampusLocation from './models/CampusLocation.js';
+import { CATEGORIES } from './config/constants.js';
+import { auth } from './middleware/auth.js';
+import { asyncHandler as wrap, fail } from './utils/asyncHandler.js';
+const root = path.dirname(fileURLToPath(import.meta.url));
+const uploadDir = path.join(root, 'uploads');
+export function createApp() {
+ const app = express();
+ app.disable('x-powered-by');
+ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: { directives: { 'img-src': ["'self'", 'data:', 'blob:'] } } }));
+ app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+ app.use(express.json({ limit: '100kb' }));
+ app.use('/uploads', express.static(uploadDir, { dotfiles: 'deny' }));
+ app.use('/demo-items', express.static(path.join(root,'../client/public/demo-items'), {dotfiles:'deny'}));
+ app.get('/api/health', (req, res) => res.status(mongoose.connection.readyState === 1 ? 200 : 503).json({ database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }));
+ app.use('/api', (req, res, next) => mongoose.connection.readyState === 1 ? next() : res.status(503).json({ message: 'MongoDB unavailable. Please try again shortly.' }));
+ app.use('/api/auth', authRoutes);
+ app.use('/api/lost', itemRoutes('lost')); app.use('/api/found', itemRoutes('found'));
+ app.use('/api/matches', matchRoutes); app.use('/api/dashboard', dashboardRoutes); app.use('/api/search', searchRoutes);
+ app.get('/api/locations', wrap(async (req, res) => res.json(await CampusLocation.find({ active: true }).sort({ type: 1, name: 1 }).lean())));
+ app.get('/api/categories', (req, res) => res.json(CATEGORIES));
+ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+ app.post('/api/uploads', auth, upload.single('image'), wrap(async (req, res) => {
+  const b = req.file?.buffer;
+  if (!b) fail(400, 'Choose a JPEG, PNG, or WebP image (maximum 5 MB).');
+  let ext;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) ext = 'jpg';
+  if (b.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) ext = 'png';
+  if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') ext = 'webp';
+  if (!ext) fail(400, 'Only JPEG, PNG, and WebP files are supported.');
+  await fs.mkdir(uploadDir, { recursive: true }); const filename = `${crypto.randomUUID()}.${ext}`;
+  await fs.writeFile(path.join(uploadDir, filename), b, { flag: 'wx' });
+  res.status(201).json({ image_url: `/uploads/${filename}` });
+ }));
+ app.use('/api', (req, res) => res.status(404).json({ message: 'API endpoint not found.' }));
+ app.use(express.static(path.join(root, '../client/dist')));
+ app.get('*', (req, res, next) => res.sendFile(path.join(root, '../client/dist/index.html'), err => err && next(err)));
+ app.use((err, req, res, next) => {
+  const status = err.status || (err.code === 11000 ? 409 : ['ValidationError', 'CastError', 'MulterError'].includes(err.name) ? 400 : 500);
+  if (status >= 500) console.error(err);
+  res.status(status).json({ message: err.code === 11000 ? 'That email is already registered.' : status >= 500 ? 'Unable to complete the request. Check the server and database logs.' : err.message });
+ });
+ return app;
+}

@@ -1,0 +1,10 @@
+node_modules/
+client/dist/
+.env
+server/.env
+server/uploads/*
+!server/uploads/.gitkeep
+coverage/
+*.log
+.mongo-data/
+server/.model-cache/
